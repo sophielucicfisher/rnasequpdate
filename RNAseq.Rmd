@@ -1,0 +1,223 @@
+---
+title: "RNA sequencing"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(limma)
+suppressPackageStartupMessages(library(plotly))
+library(Rtsne)
+library(DT)
+library(ggrepel)
+library(gridExtra)
+library(ggpubr)
+library(data.table)
+library(tidyr)
+library(dplyr)
+library(tidyverse)
+library(edgeR)
+```
+
+
+
+#home
+
+
+
+"/Users/sluc7784/Dropbox (Sydney Uni)/RNAseqfet"
+```{r base}
+baseFolder <- "/Users/sophielucicfisher/Dropbox (Sydney Uni)/RNAseqfet"
+sampleInfo <- read.csv(file.path(baseFolder, "mouseDietInfo.csv"))
+countsGenes <- read.delim(file.path(baseFolder, "unnormalisedGeneCounts.txt"))
+#the expression value 
+countsGenes[1:3,1:3]
+```
+
+```{r 1}
+dim(countsGenes)
+```
+
+```{r 2}
+sampleInfo <- sampleInfo[match(colnames(countsGenes), sampleInfo[, "Sample"]), ]
+sampleInfo[, "Diet"] <- factor(sampleInfo[, "Diet"], levels = c("Chow", "Glucose", "Sucrose"))
+#the group info
+table(sampleInfo$Diet)
+```
+
+```{r 3, echo=FALSE}
+sampleInfo
+```
+
+```{r 4, echo=FALSE}
+table(is.na(countsGenes))
+```
+
+```{r 5e, echo=FALSE}
+boxplot(countsGenes)
+```
+
+```{r 6}
+#well, if use voom and also account for the gene length, no need to log2(x+1) transform the data
+#but i think, we still can log and then voom
+# https://www.bioconductor.org/packages/devel/workflows/vignettes/RNAseq123/inst/doc/limmaWorkflow.html
+#expressiondt=log2(countsGenes+1)
+#boxplot(expressiondt)
+
+# account for the gene length, using the counts per million, cpm function
+expressiondt=cpm(countsGenes)
+# check 0 counts
+table(rowSums(expressiondt==0)==36) #22468 genes have all mice value 0 
+```
+
+```{r 7, echo=FALSE}
+expressionkeep <- names(which(rowSums(expressiondt==0)<18))
+expressiondt <- expressiondt[rownames(expressiondt)%in%expressionkeep,] #keep rows(genes) half of mice not 0
+dim(expressiondt)
+```
+
+```{r 8, echo=FALSE}
+boxplot(expressiondt) 
+```
+
+```{r 9, echo=FALSE}
+ # scale the data before pca
+pcadt1=scale(expressiondt)
+pca=prcomp(t(pcadt1)) # have to use this function, original function doesnt work
+df_toplot <- data.frame(sampleInfo$Diet, pc1 = pca$x[,1], pc2 = pca$x[,2]  )
+colnames(df_toplot)[1]="group"
+g <- ggplot(df_toplot, aes(x = pc1, y = pc2, color = group)) + 
+  geom_point() + ggtitle("pca plot")
+g
+```
+
+
+```{r 10, echo=FALSE}
+dgel <- DGEList(counts=expressiondt, group=factor(sampleInfo$Diet))
+dgel2 <- calcNormFactors(dgel)
+groupname<-as.factor(sampleInfo$Diet)
+design <- model.matrix(~ groupname + 0)
+y <- voom(dgel2, design)
+fit <- lmFit(y, design)
+cont.matrix <- makeContrasts(contrasts = c("groupnameGlucose-groupnameChow", "groupnameSucrose-groupnameChow","groupnameSucrose-groupnameGlucose"),levels=design)
+fit2 <- contrasts.fit(fit, cont.matrix)
+fit2 <- eBayes(fit2)
+limma.res=topTable(fit2,n=Inf,sort="p", adjust.method = "BH",coef = 1)
+
+datatable(format(limma.res,digits=3),options = list(
+  searching = TRUE, rownames= FALSE,
+  pageLength = 5,
+  lengthMenu = c(5, 10, 15, 20),
+  width=8),caption = "full table")
+```
+
+```{r 11, echo=FALSE}
+datatable(format(limma.res,digits=3)[limma.res$adj.P.Val<0.05,],options = list(
+  searching = TRUE, rownames= FALSE,
+  pageLength = 5,
+  lengthMenu = c(5, 10, 15, 20),
+  width=8),caption = "adjustedpval<0.05")
+```
+
+```{r 12, echo=FALSE}
+# #filter average expression>7
+# limma.res=limma.res[limma.res$AveExpr>7,]
+# datatable(limma.res,options = list(
+#   searching = TRUE, rownames= FALSE,
+#   pageLength = 5,
+#   lengthMenu = c(5, 10, 15, 20),
+#   width=8))
+
+dt=limma.res
+dt$name=rownames(dt)
+p1 <- ggplot(dt, aes(x = AveExpr, y = logFC,label=name))+
+    geom_point(aes(colour=-log10(P.Value)), alpha=1/3, size=1) +
+    scale_colour_gradient(low="blue",high="red")+
+    ylab("log2 fold change") + xlab("AveExpr")+ggtitle("GlucoseVsChow")
+p2 <- ggplot(dt, aes(logFC,-log10(P.Value),label=name))+
+    geom_point(aes(colour=-log10(P.Value)), alpha=1/3, size=1) +
+    scale_colour_gradient(low="blue",high="red")+
+    xlab("log2 fold change") + ylab("-log10 p-value")+ggtitle("GlucoseVsChow")
+ggarrange(p1,p2, ncol=2, nrow=1)
+```
+
+```{r 13, echo=FALSE}
+# p1=ggplotly(p1)
+# p2<-ggplotly(p2)
+# fig <- subplot(p1, p2)
+```
+
+```{r 14, echo=FALSE}
+suppressPackageStartupMessages(library(org.Mm.eg.db))
+limma.res$entrez = mapIds(org.Mm.eg.db,
+                     keys=row.names(limma.res), 
+                     column="ENTREZID",
+                     keytype="SYMBOL",
+                     multiVals="first")
+fc <- limma.res$logFC
+names(fc) <- as.numeric(limma.res$entrez)
+# require(gage)
+# require(gageData)
+# kegg = kegg.gsets(species = "mmu", id.type = "kegg")
+# kegg.sets.hsa = kegg$kg.sets
+# fc.kegg.p <- gage(fc, gsets = kegg.sets.hsa, ref = NULL, samp = NULL, rank.test = TRUE)
+
+require(gage)
+library("reactome.db")
+xx <- as.list(reactomePATHID2EXTID)
+#keys <- c("100034361", "100037258")
+#select(reactome.db, limma.res$entrez, c("PATHNAME"), 'ENTREZID')
+fc.kegg.p <- gage(fc, gsets = xx, ref = NULL, samp = NULL, rank.test = TRUE)
+
+updt=as.data.frame(fc.kegg.p[[1]])[,-c(1,6)]
+colnames(updt)=c("enrichment score","p","FDR","set.size")
+updt$DB_ID=rownames(updt)
+yy <- as.data.frame(reactomePATHNAME2ID)
+updt=dplyr::left_join(updt,yy,by="DB_ID")
+updt=na.omit(updt[!duplicated(updt$path_name),])
+rownames(updt)=updt$path_name
+datatable(format(updt,digits=3),options = list(
+  searching = TRUE, rownames= FALSE,
+  pageLength = 5,
+  lengthMenu = c(5, 10, 15, 20),
+  width=8
+))
+```
+
+```{r 15, echo=FALSE}
+downdt=as.data.frame(fc.kegg.p[[2]])[,-c(1,6)]
+colnames(downdt)=c("enrichment score","p","FDR","set.size")
+downdt$DB_ID=rownames(downdt)
+yy <- as.data.frame(reactomePATHNAME2ID)
+downdt=dplyr::left_join(downdt,yy,by="DB_ID")
+downdt=na.omit(downdt[!duplicated(downdt$path_name),])
+rownames(downdt)=downdt$path_name
+datatable(format(downdt,digits=3),options = list(
+  searching = TRUE, rownames= FALSE,
+  pageLength = 5,
+  lengthMenu = c(5, 10, 15, 20),
+  width=8
+))
+```
+
+```{r 16, echo=FALSE}
+both = rbind(downdt, updt)
+selectionn=both%>% 
+  filter(p < 0.05,set.size>200,FDR<0.05)
+colnames(selectionn)[1]="stat.mean"
+
+datatable(format(selectionn,digits=3),options = list(
+  searching = TRUE, rownames= FALSE,
+  pageLength = 5,
+  lengthMenu = c(5, 10, 15, 20),
+  width=8
+),caption = "restricted table to p < 0.05,set.size>200,FDR<0.05")
+```
+
+```{r 17, echo=FALSE}
+library(ggrepel )
+ggplot(selectionn, aes(x = stat.mean, y = p)) + geom_point( aes(color = set.size), size = 3) + labs(x = "Enrichment score", y = "p", title = "GSEA for significantly downregulated and upregulated pathways") + 
+  geom_text_repel(aes(label=path_name), size=3) +
+  scale_colour_gradient(high = "red", low = "blue") +
+  scale_x_continuous(
+  labels = scales::number_format(accuracy = 0.01))
+```
